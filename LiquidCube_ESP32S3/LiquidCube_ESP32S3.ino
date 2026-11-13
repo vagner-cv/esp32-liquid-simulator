@@ -46,17 +46,16 @@ Arduino_Canvas *gfx = new Arduino_Canvas(SCREEN_W, SCREEN_H, lcd, 0, 0, DISPLAY_
 static uint8_t imuAddress = 0;
 static bool imuReady = false;
 // Coordenadas do recipiente: x=direita, y=baixo, z=fundo da tela.
-// A camera obliqua revela frente, lateral e profundidade simultaneamente.
+// A tela inteira e a face frontal z=-1; a camera olha para dentro.
 struct Vec3 { float x, y, z; };
 struct Bubble { Vec3 position; float speed; int radius; };
 static Bubble bubbles[BUBBLE_COUNT];
 static Vec3 gravity = {0, 1, 0};
 static Vec3 filteredGravity = {0, 1, 0};
 static Vec3 surfaceNormal = {0, 1, 0};
-static const Vec3 CAMERA_RIGHT = {0.8660254f, 0, -0.5f};
-static const Vec3 CAMERA_DOWN = {0.25f, 0.8660254f, 0.4330127f};
-static const Vec3 CAMERA_RAY = {0.4330127f, -0.5f, 0.75f};
-static constexpr float CUBE_SCALE = 55.0f;
+static const Vec3 CAMERA_EYE = {0, 0, -4};
+static constexpr float SCREEN_SCALE = 119.5f;
+static constexpr float BUBBLE_SPEED_SCALE = 55.0f;
 static float levelThreshold = 0;
 static float wave = 0, waveSpeed = 0, wavePhase = 0;
 static unsigned long previousFrame = 0;
@@ -178,7 +177,7 @@ static float liquidDepth(const Vec3 &p) {
 
 static void spawnBubble(Bubble &bubble) {
   bubble.radius = random(1, 3);
-  bubble.speed = random(30, 74) / CUBE_SCALE;
+  bubble.speed = random(30, 74) / BUBBLE_SPEED_SCALE;
   for (int attempt = 0; attempt < 64; ++attempt) {
     Vec3 p = {random(-900, 901)/1000.0f, random(-900, 901)/1000.0f,
               random(-900, 901)/1000.0f};
@@ -233,25 +232,23 @@ static void advancePhysics(float dt) {
   }
 }
 
-// Intersecao de raio com as seis faces do recipiente (slabs).
-static bool cubeRay(const Vec3 &origin, float &nearT, float &farT) {
-  nearT = -10; farT = 10;
-  const float o[] = {origin.x, origin.y, origin.z};
-  const float d[] = {CAMERA_RAY.x, CAMERA_RAY.y, CAMERA_RAY.z};
-  for (int axis = 0; axis < 3; ++axis) {
-    float a = (-1-o[axis])/d[axis], b = (1-o[axis])/d[axis];
-    if (a > b) { float tmp = a; a = b; b = tmp; }
-    nearT = fmaxf(nearT, a); farT = fminf(farT, b);
-  }
-  return farT > nearT;
+// O raio atravessa a propria tela (z=-1) e termina em uma parede
+// interna. Frente preenche todos os pixels; fundo aparece em perspectiva.
+static Vec3 screenRay(float x, float y) {
+  return {(x-SCREEN_SCALE)/SCREEN_SCALE, (y-SCREEN_SCALE)/SCREEN_SCALE, 3};
 }
-
+static float backWallDistance(const Vec3 &ray) {
+  float farT = 5.0f/3.0f;
+  if (fabsf(ray.x) > 0.00001f) farT = fminf(farT, 1.0f/fabsf(ray.x));
+  if (fabsf(ray.y) > 0.00001f) farT = fminf(farT, 1.0f/fabsf(ray.y));
+  return farT;
+}
 static void projectPoint(const Vec3 &p, int &x, int &y) {
-  x = lroundf(120 + CUBE_SCALE*dot3(p, CAMERA_RIGHT));
-  y = lroundf(124 + CUBE_SCALE*dot3(p, CAMERA_DOWN));
+  float perspective = 3.0f/(p.z+4.0f);
+  x = lroundf(SCREEN_SCALE + SCREEN_SCALE*p.x*perspective);
+  y = lroundf(SCREEN_SCALE + SCREEN_SCALE*p.y*perspective);
 }
-
-static void drawCubeEdges(uint16_t color) {
+static void drawContainerEdges(uint16_t color) {
   for (int corner = 0; corner < 8; ++corner) {
     Vec3 a = {(corner & 1) ? 1.0f : -1.0f, (corner & 2) ? 1.0f : -1.0f,
               (corner & 4) ? 1.0f : -1.0f};
@@ -267,50 +264,89 @@ static void drawCubeEdges(uint16_t color) {
     }
   }
 }
-
-static void drawGlass() {
-  gfx->fillScreen(rgb565(4, 11, 22));
-  gfx->setTextSize(1);
-  gfx->setTextColor(rgb565(135, 205, 227));
-  gfx->setCursor(24, 11); gfx->print("LIQUID / CUBE 3D");
-  // Raio ortografico por bloco 2x2: profundidade real com custo limitado.
-  float slope = dot3(surfaceNormal, CAMERA_RAY);
-  for (int y = 34; y < 216; y += 2) {
-    for (int x = 42; x < 198; x += 2) {
-      float u = (x+0.5f-120)/CUBE_SCALE, v = (y+0.5f-124)/CUBE_SCALE;
-      Vec3 origin = {u*CAMERA_RIGHT.x+v*CAMERA_DOWN.x,
-                     u*CAMERA_RIGHT.y+v*CAMERA_DOWN.y,
-                     u*CAMERA_RIGHT.z+v*CAMERA_DOWN.z};
-      float nearT, farT;
-      if (!cubeRay(origin, nearT, farT)) continue;
-      float start = nearT, end = farT;
-      float offset = dot3(surfaceNormal, origin)-levelThreshold;
-      bool surface = false;
-      if (fabsf(slope) < 0.00001f) {
-        if (offset < 0) { gfx->fillRect(x,y,2,2,rgb565(10,26,39)); continue; }
-      } else {
-        float crossing = -offset/slope;
-        if (slope > 0) { start = fmaxf(start, crossing); surface = crossing > nearT && crossing < farT; }
-        else end = fminf(end, crossing);
-      }
-      uint16_t color = rgb565(10,26,39);
-      if (end > start) {
-        float thickness = clampf((end-start)*0.35f, 0, 1);
-        if (surface) color = rgb565(76-30*thickness, 205-35*thickness, 237-20*thickness);
-        else color = rgb565(18-10*thickness, 153-70*thickness, 218-50*thickness);
-      }
-      gfx->fillRect(x,y,2,2,color);
+// Contorno da superficie nas paredes, incluindo o contato com a tela.
+static void drawWaterOutline() {
+  Vec3 points[6];
+  float angles[6];
+  int count = 0;
+  for (int corner = 0; corner < 8; ++corner) {
+    Vec3 a = {(corner & 1) ? 1.0f : -1.0f, (corner & 2) ? 1.0f : -1.0f,
+              (corner & 4) ? 1.0f : -1.0f};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (corner & (1 << axis)) continue;
+      Vec3 b = a;
+      if (axis == 0) b.x = 1;
+      if (axis == 1) b.y = 1;
+      if (axis == 2) b.z = 1;
+      float fa = liquidDepth(a), fb = liquidDepth(b);
+      // Convencao semiaberta evita duplicar vertices quando o plano os toca.
+      if ((fa >= 0) == (fb >= 0) || count >= 6) continue;
+      float t = fa/(fa-fb);
+      points[count++] = {a.x+t*(b.x-a.x), a.y+t*(b.y-a.y), a.z+t*(b.z-a.z)};
     }
   }
+  if (count < 3) return;
+  float cx = 0, cy = 0;
+  int px[6], py[6];
+  for (int i = 0; i < count; ++i) {
+    projectPoint(points[i], px[i], py[i]); cx += px[i]; cy += py[i];
+  }
+  cx /= count; cy /= count;
+  for (int i = 0; i < count; ++i) angles[i] = atan2f(py[i]-cy, px[i]-cx);
+  for (int i = 1; i < count; ++i) {
+    for (int j = i; j > 0 && angles[j] < angles[j-1]; --j) {
+      float a = angles[j]; angles[j] = angles[j-1]; angles[j-1] = a;
+      int x = px[j]; px[j] = px[j-1]; px[j-1] = x;
+      int y = py[j]; py[j] = py[j-1]; py[j-1] = y;
+    }
+  }
+  for (int i = 0; i < count; ++i) {
+    int next = (i+1)%count;
+    gfx->drawLine(px[i],py[i],px[next],py[next],rgb565(164,247,255));
+  }
+}
+static void drawGlass() {
+  const float offset = dot3(surfaceNormal, CAMERA_EYE)-levelThreshold;
+  // 120x120 raios, cada um cobre um bloco de 2x2 pixels da tela inteira.
+  for (int y = 0; y < SCREEN_H; y += 2) {
+    for (int x = 0; x < SCREEN_W; x += 2) {
+      Vec3 ray = screenRay(x+0.5f,y+0.5f);
+      float farT = backWallDistance(ray);
+      float start = 1, end = farT;
+      float slope = dot3(surfaceNormal, ray);
+      bool surface = false;
+      if (fabsf(slope) < 0.00001f) {
+        if (offset < 0) end = start;
+      } else {
+        float crossing = -offset/slope;
+        if (slope > 0) { start = fmaxf(start, crossing); surface = crossing > 1 && crossing < farT; }
+        else end = fminf(end, crossing);
+      }
+      bool rearWall = farT > 1.6666f;
+      float baseR = rearWall ? 24 : 38;
+      float baseG = rearWall ? 36 : 54;
+      float baseB = rearWall ? 43 : 61;
+      if (end > start) {
+        float thickness = (end-start)*sqrtf(dot3(ray,ray));
+        float alpha = thickness/(0.7f+thickness);
+        float r = surface ? 26 : 6, g = surface ? 173 : 110, b = surface ? 204 : 163;
+        baseR += (r-baseR)*alpha; baseG += (g-baseG)*alpha; baseB += (b-baseB)*alpha;
+      }
+      gfx->fillRect(x,y,2,2,rgb565((uint8_t)baseR,(uint8_t)baseG,(uint8_t)baseB));
+    }
+  }
+  drawContainerEdges(rgb565(61,100,112));
+  drawWaterOutline();
   for (int i = 0; i < BUBBLE_COUNT; ++i) {
     int x, y;
     projectPoint(bubbles[i].position, x, y);
     gfx->drawCircle(x,y,bubbles[i].radius,rgb565(167,236,251));
   }
-  drawCubeEdges(rgb565(112,192,222));
-  gfx->setTextColor(imuReady ? rgb565(77,146,170) : rgb565(255,143,120));
-  gfx->setCursor(33,226);
-  gfx->print(imuReady ? "INCLINE EM 3 EIXOS" : "SENSOR NAO ENCONTRADO");
+  // Sem titulo/margens: a imagem inteira funciona como vidro frontal.
+  if (!imuReady) {
+    gfx->setTextSize(1); gfx->setTextColor(rgb565(255,143,120));
+    gfx->setCursor(51,226); gfx->print("SENSOR AUSENTE");
+  }
 }
 
 void setup() {

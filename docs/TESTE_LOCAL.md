@@ -21,7 +21,7 @@ Este documento registra o que verificar no **primeiro upload na Waveshare ESP32-
 
 - [ ] Backlight acende.
 - [ ] Texto aparece na posição correta após o giro de 90° horário.
-- [ ] Tela mostra cubo em perspectiva, com faces e profundidade visíveis, e água azul.
+- [ ] A tela inteira funciona como vidro frontal; paredes internas recuam para o fundo, sem cubo externo ou título.
 - [ ] Monitor Serial em **115200** mostra endereço do QMI8658 (`0x6B` ou `0x6A`) e `ok=1`.
 - [ ] Se não encontrar sensor, copiar o log; conferir SDA=47 e SCL=48 com a revisão do hardware.
 
@@ -30,9 +30,9 @@ Este documento registra o que verificar no **primeiro upload na Waveshare ESP32-
 - [ ] Ao inclinar para a direita, o líquido vai para o lado que corresponde à gravidade.
 - [ ] Ao inclinar para a esquerda, movimento se inverte.
 - [ ] Ao girar 90°/180° no plano da tela, o nível parece manter o volume.
-- [ ] Com a tela horizontal voltada para cima, a água se acumula no fundo do cubo.
+- [ ] Com a tela horizontal voltada para cima, a água se acumula no fundo do recipiente.
 - [ ] Ao inclinar em direção à frente/fundo da tela, o nível muda na profundidade, não apenas no plano X/Y.
-- [ ] Ao virar a placa com a tela para baixo, a água migra para a face oposta.
+- [ ] Ao virar a placa com a tela para baixo, a água vem contra o vidro e pode cobrir toda a área visível, com o ar atrás dela.
 - [ ] Ao girar lentamente em cada um dos três eixos, não aparecem saltos de volume nem travamentos.
 - [ ] Ao sacudir com cuidado, a superfície oscila e volta ao repouso.
 - [ ] Bolhas se movem para cima em relação à gravidade.

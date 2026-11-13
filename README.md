@@ -1,6 +1,6 @@
 # Liquid Cube — simulador de líquidos para ESP32-S3
 
-Firmware Arduino/C++ para a **Waveshare ESP32-S3-LCD-1.3**: um recipiente cúbico em perspectiva contendo água animada, que responde à inclinação nos três eixos, inclusive em direção à frente e ao fundo da tela. O sensor de movimento integrado **QMI8658** fornece a direção da gravidade. A água apresenta ondulação amortecida, inércia visual e bolhas.
+Firmware Arduino/C++ para a **Waveshare ESP32-S3-LCD-1.3**: um recipiente 3D visto através da própria tela, que funciona como parede frontal, contendo água animada, que responde à inclinação nos três eixos, inclusive em direção à frente e ao fundo da tela. O sensor de movimento integrado **QMI8658** fornece a direção da gravidade. A água apresenta ondulação amortecida, inércia visual e bolhas.
 
 > **Status:** protótipo 3D. A geometria foi verificada em testes no computador com APIs de hardware simuladas; a versão 3D **ainda não foi compilada para ESP32-S3 nem validada na placa física**. O teste local determinará ajustes de eixo e desempenho.
 
@@ -65,11 +65,11 @@ Os sinais são aplicados aos eixos do sensor antes da compensação da rotação
 
 O eixo Z participa do cálculo mesmo com a tela horizontal. Inclinar a placa para a frente ou para trás muda a posição do líquido na profundidade do cubo; virar a placa transfere o líquido para a face oposta. Se frente e fundo estiverem invertidos, confira `AXIS_Z_SIGN` com o teste local.
 
-A projeção oblíqua mostra a profundidade em um display 2D. A simulação usa um volume 3D com superfície plana oscilante e conservação de preenchimento; ainda não resolve escoamento, respingos ou ondas locais como um solver completo de fluidos. O desenho usa blocos 2 × 2 para limitar o custo. O intervalo de 33 ms é um alvo, não uma medição de FPS.
+A tela inteira coincide com a face frontal do recipiente. A câmera olha de frente para dentro: as paredes laterais recuam até o fundo, sem um cubo flutuando fora da tela. Não há título nem margens durante o funcionamento normal. A rotação de 90° horário foi mantida. A simulação usa um volume 3D com superfície plana oscilante e conservação de preenchimento; ainda não resolve escoamento, respingos ou ondas locais como um solver completo de fluidos. O desenho usa blocos 2 × 2 para limitar o custo. O intervalo de 33 ms é um alvo, não uma medição de FPS.
 
 ## Validação desta alteração
 
-- Testes C++ no computador com AddressSanitizer e UndefinedBehaviorSanitizer: nove orientações de preenchimento, inversão frente/fundo, interseção de raios, bolhas e execução de 100 quadros; aprovados. As chamadas Arduino/GFX/I²C foram simuladas, portanto esses testes não comprovam compilação ou execução no ESP32.
+- Testes C++ no computador com AddressSanitizer e UndefinedBehaviorSanitizer: nove orientações de preenchimento, inversão frente/fundo, projeção da face frontal nos limites da tela, raios até as paredes internas, bolhas e execução de 100 quadros; aprovados. As chamadas Arduino/GFX/I²C foram simuladas, portanto esses testes não comprovam compilação ou execução no ESP32.
 - Assinaturas dos construtores SPI, ST7789 e Canvas conferidas no código Arduino_GFX consultado (versão declarada 1.6.9). Incluído `esp_random.h` explicitamente para a função usada no seed.
 - Arduino CLI 1.3.1 instalado no ambiente com SHA-256 verificado. Instalação do core/biblioteca bloqueada pela política de rede nos índices Arduino/Espressif; compilação real pendente.
 - GPIOs, registradores do QMI8658 e frequência SPI foram preservados. O teste físico ainda deve confirmar tela, orientação, sensor e fluidez.
