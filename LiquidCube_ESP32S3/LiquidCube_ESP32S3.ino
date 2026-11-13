@@ -2,7 +2,7 @@
   LIQUID CUBE - Waveshare ESP32-S3-LCD-1.3
   Tela: ST7789 240x240, sensor: QMI8658 (I2C)
   Requer: GFX Library for Arduino (Arduino_GFX)
-  Simulacao 2D de liquido, inclinacao, ondas, inercia e bolhas.
+  Simulacao volumetrica 3D de liquido, inclinacao, ondas, inercia e bolhas.
 
   Este sketch SUBSTITUI o firmware antigo quando enviado pela Arduino IDE.
   Nao altera o conteudo do microSD.
@@ -12,6 +12,7 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include <math.h>
+#include <esp_random.h>
 
 // ----------------------- PINAGEM DA SUA PLACA -----------------------
 static constexpr int PIN_LCD_DC   = 38;
@@ -28,41 +29,46 @@ static constexpr int PIN_IMU_SCL  = 48;
 static constexpr bool SWAP_XY = false;
 static constexpr float AXIS_X_SIGN = -1.0f;
 static constexpr float AXIS_Y_SIGN = -1.0f;
+static constexpr float AXIS_Z_SIGN = -1.0f;
+// Canvas: (x,y) -> (239-y,x), 90 graus no sentido horario.
+static constexpr uint8_t DISPLAY_ROTATION = 1;
 
 static constexpr int SCREEN_W = 240;
 static constexpr int SCREEN_H = 240;
-static constexpr int L = 31;    // limite interno esquerdo
-static constexpr int R = 208;   // limite interno direito
-static constexpr int T = 43;    // limite interno superior
-static constexpr int B = 204;   // limite interno inferior
 static constexpr float WATER_FRACTION = 0.57f;
 static constexpr int BUBBLE_COUNT = 17;
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(
   PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCK, PIN_LCD_MOSI, GFX_NOT_DEFINED);
 Arduino_GFX *lcd = new Arduino_ST7789(bus, PIN_LCD_RST, 0, true, 240, 240, 0, 0, 0, 0);
-Arduino_Canvas *gfx = new Arduino_Canvas(SCREEN_W, SCREEN_H, lcd);
+Arduino_Canvas *gfx = new Arduino_Canvas(SCREEN_W, SCREEN_H, lcd, 0, 0, DISPLAY_ROTATION);
 
 static uint8_t imuAddress = 0;
 static bool imuReady = false;
-static uint16_t waterPalette[48];
-
-struct Bubble { float x, y, speed; int radius; };
+// Coordenadas do recipiente: x=direita, y=baixo, z=fundo da tela.
+// A camera obliqua revela frente, lateral e profundidade simultaneamente.
+struct Vec3 { float x, y, z; };
+struct Bubble { Vec3 position; float speed; int radius; };
 static Bubble bubbles[BUBBLE_COUNT];
-
-static float downX = 0.0f;
-static float downY = 1.0f;
-// Filtro independente: permite girar completamente 180 graus sem travar.
-static float filteredX = 0.0f;
-static float filteredY = 1.0f;
-static float lastRawX = 0.0f;
-static float lastRawY = 1.0f;
-static float wave = 0.0f;
-static float waveSpeed = 0.0f;
-static float wavePhase = 0.0f;
-static float disturbance = 0.0f;
-static float levelThreshold = 0.0f;
+static Vec3 gravity = {0, 1, 0};
+static Vec3 filteredGravity = {0, 1, 0};
+static Vec3 surfaceNormal = {0, 1, 0};
+static const Vec3 CAMERA_RIGHT = {0.8660254f, 0, -0.5f};
+static const Vec3 CAMERA_DOWN = {0.25f, 0.8660254f, 0.4330127f};
+static const Vec3 CAMERA_RAY = {0.4330127f, -0.5f, 0.75f};
+static constexpr float CUBE_SCALE = 55.0f;
+static float levelThreshold = 0;
+static float wave = 0, waveSpeed = 0, wavePhase = 0;
 static unsigned long previousFrame = 0;
+
+static float dot3(const Vec3 &a, const Vec3 &b) {
+  return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+static Vec3 normalized(const Vec3 &v) {
+  float m = sqrtf(dot3(v, v));
+  if (m < 0.0001f) return {0, 1, 0};
+  return {v.x/m, v.y/m, v.z/m};
+}
 
 static inline float clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
@@ -123,193 +129,188 @@ static bool readAcceleration(float &ax, float &ay, float &az) {
   return true;
 }
 
-struct Point { float x, y; };
-
-// Recorta o retangulo do vidro pelo semiplano ocupado pela agua.
-// O calculo da area mantem o volume aparente durante a rotacao.
-static float areaUnderSurface(float threshold, float nx, float ny) {
-  Point a[8] = {{(float)L,(float)T}, {(float)R,(float)T},
-                {(float)R,(float)B}, {(float)L,(float)B}};
-  Point b[8];
-  int count = 4, outCount = 0;
-  const float cx = (L + R) * 0.5f, cy = (T + B) * 0.5f;
-  for (int i = 0; i < count; ++i) {
-    Point p = a[i], q = a[(i + 1) % count];
-    float fp = nx*(p.x-cx) + ny*(p.y-cy) - threshold;
-    float fq = nx*(q.x-cx) + ny*(q.y-cy) - threshold;
-    bool inP = fp >= 0.0f, inQ = fq >= 0.0f;
-    if (inP) b[outCount++] = p;
-    if (inP != inQ && outCount < 8) {
-      float t = fp / (fp - fq);
-      b[outCount++] = {p.x + t*(q.x-p.x), p.y + t*(q.y-p.y)};
+// Fracao exata do cubo [-1,1]^3 abaixo do plano (convolucao de
+// uniformes). Usa double para evitar cancelamento perto dos eixos.
+static float volumeBelow(float threshold, const Vec3 &normal) {
+  double widths[3];
+  int dimensions = 0;
+  double span = 0, denominator = 1;
+  const float components[] = {normal.x, normal.y, normal.z};
+  for (float component : components) {
+    double width = 2.0 * fabsf(component);
+    if (width < 0.002) continue;
+    widths[dimensions++] = width;
+    span += width * 0.5;
+    denominator *= width;
+  }
+  if (!dimensions) return threshold >= 0 ? 1 : 0;
+  for (int i = 2; i <= dimensions; ++i) denominator *= i;
+  double sum = 0;
+  for (int mask = 0; mask < (1 << dimensions); ++mask) {
+    double t = threshold + span;
+    int parity = 0;
+    for (int axis = 0; axis < dimensions; ++axis) {
+      if (mask & (1 << axis)) { t -= widths[axis]; ++parity; }
+    }
+    if (t > 0) {
+      double term = 1;
+      for (int i = 0; i < dimensions; ++i) term *= t;
+      sum += (parity & 1) ? -term : term;
     }
   }
-  if (outCount < 3) return 0;
-  float twiceArea = 0;
-  for (int i = 0; i < outCount; ++i) {
-    Point p = b[i], q = b[(i+1) % outCount];
-    twiceArea += p.x*q.y - q.x*p.y;
-  }
-  return fabsf(twiceArea)*0.5f;
+  return clampf((float)(sum / denominator), 0, 1);
 }
 
-static void computeLevel(float nx, float ny) {
-  const float targetArea = (R-L)*(B-T)*WATER_FRACTION;
-  float lo = -300.0f, hi = 300.0f;
-  for (int i = 0; i < 15; ++i) {
+static void computeLevel() {
+  float span = fabsf(surfaceNormal.x) + fabsf(surfaceNormal.y) + fabsf(surfaceNormal.z);
+  float lo = -span, hi = span;
+  for (int i = 0; i < 18; ++i) {
     float mid = (lo + hi)*0.5f;
-    if (areaUnderSurface(mid, nx, ny) > targetArea) lo = mid;
+    if (volumeBelow(mid, surfaceNormal) < 1.0f-WATER_FRACTION) lo = mid;
     else hi = mid;
   }
-  levelThreshold = (lo + hi)*0.5f;
+  levelThreshold = (lo+hi)*0.5f;
 }
 
-static float liquidDepth(float x, float y) {
-  const float cx = (L+R)*0.5f, cy = (T+B)*0.5f;
-  float rx = x-cx, ry = y-cy;
-  float along = -downY*rx + downX*ry;
-  float ripple = wave*sinf(along*0.045f+wavePhase);
-  ripple += wave*0.36f*sinf(along*0.089f-wavePhase*1.7f);
-  return downX*rx + downY*ry - levelThreshold - ripple;
+static float liquidDepth(const Vec3 &p) {
+  return dot3(surfaceNormal, p) - levelThreshold;
 }
 
-static void spawnBubble(Bubble &bubble, int index) {
-  bubble.radius = random(1, 4);
-  bubble.speed = (float)random(30, 74); // pixels / segundo
-  for (int attempt = 0; attempt < 32; ++attempt) {
-    float x = random(L+10, R-10);
-    float y = random(T+10, B-10);
-    if (liquidDepth(x, y) > 15.0f) {
-      bubble.x = x; bubble.y = y; return;
-    }
+static void spawnBubble(Bubble &bubble) {
+  bubble.radius = random(1, 3);
+  bubble.speed = random(30, 74) / CUBE_SCALE;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    Vec3 p = {random(-900, 901)/1000.0f, random(-900, 901)/1000.0f,
+              random(-900, 901)/1000.0f};
+    if (liquidDepth(p) > 0.15f) { bubble.position = p; return; }
   }
-  // Fallback raro, caso o volume do liquido esteja muito lateralizado.
-  bubble.x = (L+R)*0.5f + downX*48.0f;
-  bubble.y = (T+B)*0.5f + downY*48.0f;
+  bubble.position = {surfaceNormal.x*0.8f, surfaceNormal.y*0.8f, surfaceNormal.z*0.8f};
 }
 
 static void advancePhysics(float dt) {
   float ax, ay, az;
   if (imuReady && readAcceleration(ax, ay, az)) {
-    float sx = SWAP_XY ? ay : ax;
-    float sy = SWAP_XY ? ax : ay;
-    sx *= AXIS_X_SIGN;
-    sy *= AXIS_Y_SIGN;
-    float planar = sqrtf(sx*sx + sy*sy);
-    float targetX = 0.0f, targetY = 1.0f;
-    if (planar > 0.14f) {
-      targetX = sx / planar;
-      targetY = sy / planar;
+    float sx = (SWAP_XY ? ay : ax)*AXIS_X_SIGN;
+    float sy = (SWAP_XY ? ax : ay)*AXIS_Y_SIGN;
+    // Inversa da rotacao visual horaria: os eixos acompanham o texto.
+    Vec3 measured = {sy, -sx, az*AXIS_Z_SIGN};
+    float magnitude = sqrtf(dot3(measured, measured));
+    // Em queda livre, conserva a ultima direcao em vez de inventar gravidade.
+    if (magnitude > 0.14f) {
+      Vec3 target = normalized(measured);
+      float blend = clampf(dt*8, 0, 1);
+      filteredGravity.x += (target.x-filteredGravity.x)*blend;
+      filteredGravity.y += (target.y-filteredGravity.y)*blend;
+      filteredGravity.z += (target.z-filteredGravity.z)*blend;
+      if (dot3(filteredGravity, filteredGravity) > 0.0004f) {
+        Vec3 next = normalized(filteredGravity);
+        waveSpeed += clampf((1-dot3(gravity, next))*40, 0, 2);
+        gravity = next;
+      }
+      waveSpeed += clampf(fabsf(magnitude-1)*2, 0, 2)*sinf(wavePhase*3);
     }
-
-    // Filtro da direcao da gravidade, evitando tremedeira de leitura.
-    float oldX = downX, oldY = downY;
-    float blend = clampf(dt*8.0f, 0.0f, 1.0f);
-    filteredX += (targetX - filteredX)*blend;
-    filteredY += (targetY - filteredY)*blend;
-    float mag = sqrtf(filteredX*filteredX + filteredY*filteredY);
-    if (mag > 0.02f) {
-      downX = filteredX / mag;
-      downY = filteredY / mag;
-    }
-
-    // Mudancas de direcao excitam uma onda amortecida (efeito de inercia).
-    float angularChange = oldX*downY - oldY*downX;
-    waveSpeed += clampf(angularChange*165.0f, -9.0f, 9.0f);
-
-    // Sacudidas geram perturbacao mesmo se a orientacao nao mudar muito.
-    float g = sqrtf(ax*ax + ay*ay + az*az);
-    float shock = clampf(fabsf(g-1.0f), 0.0f, 1.0f);
-    disturbance = fmaxf(disturbance, shock*10.0f);
-    waveSpeed += clampf(shock*4.0f*sinf(wavePhase*3.0f), -3.0f, 3.0f);
-
-    // Mudanca brusca de forca tambem produz um pouco de onda.
-    waveSpeed += clampf((sx-lastRawX + sy-lastRawY)*1.3f, -1.5f, 1.5f);
-    lastRawX = sx;
-    lastRawY = sy;
   }
-
-  // Oscilador massa-mola amortecido: liquido balanca antes de parar.
-  waveSpeed += (-wave*27.0f - waveSpeed*6.5f)*dt;
-  wave += waveSpeed*dt;
-  wave = clampf(wave, -17.0f, 17.0f);
-  disturbance *= expf(-dt*2.4f);
-  wavePhase += dt*(2.2f + disturbance*0.6f);
-
-  computeLevel(downX, downY);
-
+  waveSpeed += (-wave*27-waveSpeed*6.5f)*dt;
+  wave = clampf(wave+waveSpeed*dt, -0.25f, 0.25f);
+  wavePhase += dt*2.2f;
+  // Balanco em um plano tangente a gravidade, sem criar/perder volume.
+  Vec3 reference = fabsf(gravity.z) < 0.9f ? Vec3{0,0,1} : Vec3{1,0,0};
+  float projection = dot3(reference, gravity);
+  Vec3 tangent = normalized({reference.x-projection*gravity.x,
+                            reference.y-projection*gravity.y,
+                            reference.z-projection*gravity.z});
+  surfaceNormal = normalized({gravity.x+wave*tangent.x,
+                              gravity.y+wave*tangent.y,
+                              gravity.z+wave*tangent.z});
+  computeLevel();
   for (int i = 0; i < BUBBLE_COUNT; ++i) {
-    Bubble &bubble = bubbles[i];
-    bubble.x += (-downX*bubble.speed + sinf(wavePhase+i*2.7f)*7.0f)*dt;
-    bubble.y += (-downY*bubble.speed + cosf(wavePhase+i*1.3f)*5.0f)*dt;
-    if (bubble.x < L+4 || bubble.x > R-4 ||
-        bubble.y < T+4 || bubble.y > B-4 ||
-        liquidDepth(bubble.x, bubble.y) < 3.0f) {
-      spawnBubble(bubble, i);
+    Bubble &b = bubbles[i];
+    b.position.x -= gravity.x*b.speed*dt;
+    b.position.y -= gravity.y*b.speed*dt;
+    b.position.z -= gravity.z*b.speed*dt;
+    if (fabsf(b.position.x) > 0.94f || fabsf(b.position.y) > 0.94f ||
+        fabsf(b.position.z) > 0.94f || liquidDepth(b.position) < 0.05f) spawnBubble(b);
+  }
+}
+
+// Intersecao de raio com as seis faces do recipiente (slabs).
+static bool cubeRay(const Vec3 &origin, float &nearT, float &farT) {
+  nearT = -10; farT = 10;
+  const float o[] = {origin.x, origin.y, origin.z};
+  const float d[] = {CAMERA_RAY.x, CAMERA_RAY.y, CAMERA_RAY.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    float a = (-1-o[axis])/d[axis], b = (1-o[axis])/d[axis];
+    if (a > b) { float tmp = a; a = b; b = tmp; }
+    nearT = fmaxf(nearT, a); farT = fminf(farT, b);
+  }
+  return farT > nearT;
+}
+
+static void projectPoint(const Vec3 &p, int &x, int &y) {
+  x = lroundf(120 + CUBE_SCALE*dot3(p, CAMERA_RIGHT));
+  y = lroundf(124 + CUBE_SCALE*dot3(p, CAMERA_DOWN));
+}
+
+static void drawCubeEdges(uint16_t color) {
+  for (int corner = 0; corner < 8; ++corner) {
+    Vec3 a = {(corner & 1) ? 1.0f : -1.0f, (corner & 2) ? 1.0f : -1.0f,
+              (corner & 4) ? 1.0f : -1.0f};
+    for (int axis = 0; axis < 3; ++axis) {
+      if (corner & (1 << axis)) continue;
+      Vec3 b = a;
+      if (axis == 0) b.x = 1;
+      if (axis == 1) b.y = 1;
+      if (axis == 2) b.z = 1;
+      int x0, y0, x1, y1;
+      projectPoint(a, x0, y0); projectPoint(b, x1, y1);
+      gfx->drawLine(x0, y0, x1, y1, color);
     }
   }
 }
 
 static void drawGlass() {
-  const uint16_t edge = rgb565(112, 192, 222);
-  const uint16_t dim = rgb565(45, 87, 110);
-  const uint16_t glass = rgb565(10, 26, 39);
-
   gfx->fillScreen(rgb565(4, 11, 22));
-  // Texto discreto da interface.
   gfx->setTextSize(1);
   gfx->setTextColor(rgb565(135, 205, 227));
-  gfx->setCursor(24, 11);
-  gfx->print("LIQUID / CUBE");
-  gfx->setCursor(180, 11);
-  gfx->print("v1.0");
-
-  // Sombra e estrutura de vidro em perspectiva leve.
-  gfx->fillRoundRect(18, 28, 204, 191, 15, rgb565(6, 16, 28));
-  gfx->drawRoundRect(19, 28, 202, 189, 14, dim);
-  gfx->fillRoundRect(25, 36, 190, 174, 7, glass);
-
-  // Marcacoes discretas ficam por tras da agua.
-  for (int y = 67; y <= 190; y += 31) {
-    gfx->drawFastHLine(34, y, 7, rgb565(29, 67, 84));
-    gfx->drawFastHLine(199, y, 6, rgb565(29, 67, 84));
-  }
-
-  // Agua: sombreado por profundidade, superficie com ondas.
-  for (int y = T; y <= B; ++y) {
-    for (int x = L; x <= R; ++x) {
-      float depth = liquidDepth(x, y);
-      if (depth >= 0.0f) {
-        int pi = (int)(depth*0.31f);
-        if (pi > 47) pi = 47;
-        gfx->drawPixel(x, y, waterPalette[pi]);
-        if (depth < 1.9f) gfx->drawPixel(x, y, rgb565(153, 239, 249));
+  gfx->setCursor(24, 11); gfx->print("LIQUID / CUBE 3D");
+  // Raio ortografico por bloco 2x2: profundidade real com custo limitado.
+  float slope = dot3(surfaceNormal, CAMERA_RAY);
+  for (int y = 34; y < 216; y += 2) {
+    for (int x = 42; x < 198; x += 2) {
+      float u = (x+0.5f-120)/CUBE_SCALE, v = (y+0.5f-124)/CUBE_SCALE;
+      Vec3 origin = {u*CAMERA_RIGHT.x+v*CAMERA_DOWN.x,
+                     u*CAMERA_RIGHT.y+v*CAMERA_DOWN.y,
+                     u*CAMERA_RIGHT.z+v*CAMERA_DOWN.z};
+      float nearT, farT;
+      if (!cubeRay(origin, nearT, farT)) continue;
+      float start = nearT, end = farT;
+      float offset = dot3(surfaceNormal, origin)-levelThreshold;
+      bool surface = false;
+      if (fabsf(slope) < 0.00001f) {
+        if (offset < 0) { gfx->fillRect(x,y,2,2,rgb565(10,26,39)); continue; }
+      } else {
+        float crossing = -offset/slope;
+        if (slope > 0) { start = fmaxf(start, crossing); surface = crossing > nearT && crossing < farT; }
+        else end = fminf(end, crossing);
       }
+      uint16_t color = rgb565(10,26,39);
+      if (end > start) {
+        float thickness = clampf((end-start)*0.35f, 0, 1);
+        if (surface) color = rgb565(76-30*thickness, 205-35*thickness, 237-20*thickness);
+        else color = rgb565(18-10*thickness, 153-70*thickness, 218-50*thickness);
+      }
+      gfx->fillRect(x,y,2,2,color);
     }
   }
-
-  // Bolhas transparentes que sobem contra a gravidade.
   for (int i = 0; i < BUBBLE_COUNT; ++i) {
-    const Bubble &b = bubbles[i];
-    if (liquidDepth(b.x, b.y) > b.radius+2) {
-      gfx->drawCircle((int)b.x, (int)b.y, b.radius, rgb565(167, 236, 251));
-      gfx->drawPixel((int)b.x-1, (int)b.y-1, rgb565(223, 250, 253));
-    }
+    int x, y;
+    projectPoint(bubbles[i].position, x, y);
+    gfx->drawCircle(x,y,bubbles[i].radius,rgb565(167,236,251));
   }
-
-  // Reflexos e aros frontais reforcam a ideia de um recipiente de vidro.
-  gfx->drawRoundRect(24, 35, 192, 176, 8, edge);
-  gfx->drawRoundRect(27, 38, 186, 170, 6, rgb565(51, 108, 140));
-  gfx->drawFastVLine(29, 47, 151, rgb565(92, 159, 188));
-  gfx->drawFastVLine(211, 47, 151, rgb565(35, 80, 105));
-  gfx->drawLine(35, 41, 202, 41, rgb565(107, 165, 191));
-  gfx->drawFastHLine(41, 208, 157, rgb565(52, 104, 129));
-  gfx->drawLine(40, 48, 40, 65, rgb565(169, 222, 239));
-  gfx->drawLine(41, 48, 42, 47, rgb565(169, 222, 239));
-
-  gfx->setTextColor(imuReady ? rgb565(77, 146, 170) : rgb565(255, 143, 120));
-  gfx->setCursor(51, 226);
-  gfx->print(imuReady ? "INCLINE PARA MOVER" : "SENSOR NAO ENCONTRADO");
+  drawCubeEdges(rgb565(112,192,222));
+  gfx->setTextColor(imuReady ? rgb565(77,146,170) : rgb565(255,143,120));
+  gfx->setCursor(33,226);
+  gfx->print(imuReady ? "INCLINE EM 3 EIXOS" : "SENSOR NAO ENCONTRADO");
 }
 
 void setup() {
@@ -328,16 +329,9 @@ void setup() {
   Wire.setClock(400000);
   imuReady = startIMU();
 
-  for (int i = 0; i < 48; ++i) {
-    float t = i/47.0f;
-    waterPalette[i] = rgb565((uint8_t)(18 - 10*t),
-                             (uint8_t)(184 - 92*t),
-                             (uint8_t)(251 - 45*t));
-  }
-
   randomSeed(esp_random());
-  computeLevel(downX, downY);
-  for (int i = 0; i < BUBBLE_COUNT; ++i) spawnBubble(bubbles[i], i);
+  computeLevel();
+  for (int i = 0; i < BUBBLE_COUNT; ++i) spawnBubble(bubbles[i]);
   previousFrame = millis();
 }
 

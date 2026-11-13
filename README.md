@@ -1,15 +1,16 @@
 # Liquid Cube — simulador de líquidos para ESP32-S3
 
-Firmware Arduino/C++ para a **Waveshare ESP32-S3-LCD-1.3**: uma caixa de vidro na tela contendo água animada, com nível que se desloca conforme a inclinação da placa. O sensor de movimento integrado **QMI8658** fornece a direção da gravidade. A água apresenta ondulação amortecida, inércia visual e bolhas.
+Firmware Arduino/C++ para a **Waveshare ESP32-S3-LCD-1.3**: um recipiente cúbico em perspectiva contendo água animada, que responde à inclinação nos três eixos, inclusive em direção à frente e ao fundo da tela. O sensor de movimento integrado **QMI8658** fornece a direção da gravidade. A água apresenta ondulação amortecida, inércia visual e bolhas.
 
-> **Status:** protótipo v1.0. Código inicial gerado e importado para este repositório. **Ainda não compilado nem validado na placa física.** O teste local determinará possíveis ajustes de biblioteca, eixo e desempenho.
+> **Status:** protótipo 3D. A geometria foi verificada em testes no computador com APIs de hardware simuladas; a versão 3D **ainda não foi compilada para ESP32-S3 nem validada na placa física**. O teste local determinará ajustes de eixo e desempenho.
 
 ## Recursos
 
 - Visualização em **ST7789 240 × 240** com moldura e reflexos de vidro.
-- Água preenchendo ~57% do recipiente, com volume aparente aproximadamente conservado ao girar.
+- Água preenchendo ~57% do volume 3D do recipiente, com nível calculado por recorte de um cubo por um plano.
 - Leitura do acelerômetro **QMI8658** por I²C (endereços 0x6A / 0x6B).
-- Ondas, amortecimento, bolhas e sombras.
+- Balanço amortecido da superfície e bolhas com posição e movimento em 3D.
+- Imagem girada 90° no sentido horário, com compensação dos eixos X/Y.
 - Sem Wi-Fi, cartão SD ou módulos adicionais; renderização via **Arduino_GFX** com canvas.
 
 ## Hardware
@@ -56,13 +57,22 @@ No início do `.ino`, ajuste os valores se os eixos ficarem invertidos:
 static constexpr bool SWAP_XY = false;
 static constexpr float AXIS_X_SIGN = -1.0f;
 static constexpr float AXIS_Y_SIGN = -1.0f;
+static constexpr float AXIS_Z_SIGN = -1.0f;
+static constexpr uint8_t DISPLAY_ROTATION = 1; // 90° horário
 ```
 
-- Água se movendo horizontalmente no sentido errado: inverta `AXIS_X_SIGN`.
-- Água se movendo verticalmente no sentido errado: inverta `AXIS_Y_SIGN`.
-- Movimentos em eixos trocados: alterne `SWAP_XY`.
+Os sinais são aplicados aos eixos do sensor antes da compensação da rotação da imagem. Com a rotação atual, o X do sensor alimenta o Y lógico (com sinal invertido), e o Y do sensor alimenta o X lógico. `SWAP_XY` troca os eixos antes dessa transformação; confirme as direções na placa antes de ajustar sinais.
 
-Quando a tela está perfeitamente horizontal, a projeção de gravidade no plano da tela se aproxima de zero; o firmware assume uma orientação visual padrão. Este é um **efeito 2D** e não uma simulação física tridimensional de fluidos.
+O eixo Z participa do cálculo mesmo com a tela horizontal. Inclinar a placa para a frente ou para trás muda a posição do líquido na profundidade do cubo; virar a placa transfere o líquido para a face oposta. Se frente e fundo estiverem invertidos, confira `AXIS_Z_SIGN` com o teste local.
+
+A projeção oblíqua mostra a profundidade em um display 2D. A simulação usa um volume 3D com superfície plana oscilante e conservação de preenchimento; ainda não resolve escoamento, respingos ou ondas locais como um solver completo de fluidos. O desenho usa blocos 2 × 2 para limitar o custo. O intervalo de 33 ms é um alvo, não uma medição de FPS.
+
+## Validação desta alteração
+
+- Testes C++ no computador com AddressSanitizer e UndefinedBehaviorSanitizer: nove orientações de preenchimento, inversão frente/fundo, interseção de raios, bolhas e execução de 100 quadros; aprovados. As chamadas Arduino/GFX/I²C foram simuladas, portanto esses testes não comprovam compilação ou execução no ESP32.
+- Assinaturas dos construtores SPI, ST7789 e Canvas conferidas no código Arduino_GFX consultado (versão declarada 1.6.9). Incluído `esp_random.h` explicitamente para a função usada no seed.
+- Arduino CLI 1.3.1 instalado no ambiente com SHA-256 verificado. Instalação do core/biblioteca bloqueada pela política de rede nos índices Arduino/Espressif; compilação real pendente.
+- GPIOs, registradores do QMI8658 e frequência SPI foram preservados. O teste físico ainda deve confirmar tela, orientação, sensor e fluidez.
 
 ## Estrutura
 
