@@ -1,0 +1,31 @@
+# Arduino IDE temporary/build products
+build/
+**/build/
+*.bin
+*.elf
+*.map
+*.hex
+*.o
+*.a
+*.d
+*.tmp
+*.bak
+*.log
+
+# PlatformIO (if adopted later)
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*~
+
+# Local secrets
+.env
+.env.*
+!.env.example
