@@ -100,3 +100,7 @@ A tela inteira coincide com a face frontal do recipiente. A câmera olha de fren
 - [Arduino_GFX — Moon On Our Nation](https://github.com/moononournation/Arduino_GFX)
 
 Projeto experimental de eletrônica + software embarcado.
+
+## Animações ASCII para a mesma placa
+
+Em [`AsciiShows/`](AsciiShows/README.md) estão quatro sketches independentes: árvore de Natal e água-viva, cada uma em tela cheia ou com código rolando no painel inferior. Incluem prévias, ZIPs e instruções de instalação. O firmware do Liquid Cube permanece na pasta original.
